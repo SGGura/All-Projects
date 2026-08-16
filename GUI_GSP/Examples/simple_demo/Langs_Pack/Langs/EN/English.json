@@ -1,0 +1,5 @@
+[
+    {"AppTitle":   [ "GUI_GSP Demo", "lv_font_unscii_8" ]},
+    {"Hello":      [ "Hello!", "lv_font_unscii_8" ]},
+    {"BottomLine": [ "< Back", "lv_font_unscii_8" ]}
+]

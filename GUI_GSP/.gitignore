@@ -1,0 +1,43 @@
+# Build / IDE
+*.o
+*.obj
+*.hex
+*.bin
+*.elf
+*.map
+*.d
+*.dep
+*.pre
+*.lst
+*.s
+*.cof
+*.mcp
+*.mcw
+*.pjt
+*.wpj
+*.bak
+*.tmp
+*~
+.build/
+build/
+Debug/
+Release/
+dist/
+out/
+
+# MPLAB / XC8
+*.p1
+*.deps
+*.sym
+*.cmf
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+*.swp
+*.swo
+.vscode/
+.idea/
