@@ -37,9 +37,9 @@ It knows nothing about the panel or the buttons.
 
 | Button | Action | Simulator key |
 |---|---|---|
-| LEFT / RIGHT | move | ← → or A / D |
-| UP | rotate clockwise | ↑ or W |
-| DOWN | soft drop | ↓ or S |
+| LEFT / RIGHT | move | ← → |
+| UP | rotate clockwise | ↑ |
+| DOWN | soft drop | ↓ |
 | A | hard drop, confirm | Space or Z |
 | B | HOLD *(optional button)* | C or Left Shift |
 | START | pause *(optional button)* | Enter or P |
@@ -55,17 +55,24 @@ cd TETRIS_GAME
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ./build/tetris_sdl --scale 3     # 720x960 window, 240x320 image, no smoothing
+./build/tetris_sdl --demo        # let the built-in bot play
 ```
 
 The window is a pixel exact stand-in for the panel: the game renders into a
 240×320 RGB565 buffer that is uploaded to an `SDL_PIXELFORMAT_RGB565` texture
-unchanged.
+unchanged. Escape quits.
+
+Besides sampling the keyboard state once per frame, the simulator latches key
+presses from the event queue: without that, a tap shorter than 16 ms would be
+lost between two polls. The same applies on hardware if buttons are polled
+infrequently.
 
 ## Tests
 
-`tetris_shots` is a headless harness. It plays with a bot (stack evaluated by
-height, holes, bumpiness and completed lines), checks invariants and writes
-PNG screenshots. It needs neither a display nor SDL, so it runs in CI.
+`tetris_shots` is a headless harness. It plays with the bot from `src/bot.c`
+(stack evaluated by height, holes, bumpiness and completed lines), checks
+invariants and writes PNG screenshots. It needs neither a display nor SDL, so
+it runs in CI.
 
 ```bash
 ./build/tetris_shots build/shots
@@ -86,7 +93,8 @@ TETRIS_GAME/
 ├── src/
 │   ├── tetris.c      game logic and screen rendering
 │   ├── gfx.c         pixels, rectangles, frames, text
-│   └── font5x7.c     glyphs 0x20..0x5F
+│   ├── font5x7.c     glyphs 0x20..0x5F
+│   └── bot.c         optional automatic player (tests and demo mode)
 ├── port/
 │   └── main_sdl.c    desktop simulator, keyboard only
 └── tools/
@@ -172,7 +180,7 @@ swap the bytes inside `tft_blit`.
 
 | | |
 |---|---|
-| Code (gcc `-Os`, x86-64) | ≈ 10 KB, noticeably less on Cortex-M |
+| Code (gcc `-Os`, x86-64) | ≈ 10 KB, noticeably less on Cortex-M; `bot.c` is not included and is not needed on a device |
 | Game RAM | ≈ 0.6 KB static, no dynamic allocation |
 | Frame buffer | 3.8 KB (8-row band) up to 150 KB (full screen) |
 | Tick rate | `tetris_tick()` every ~16 ms; everything is timestamp driven, so a slower loop just looks less smooth |

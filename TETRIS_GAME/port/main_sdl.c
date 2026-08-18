@@ -13,25 +13,55 @@
 
 #include "gfx.h"
 #include "tetris.h"
+#include "bot.h"
 
 #define HISCORE_FILE "tetris_hiscore.dat"
 
 static uint16_t framebuffer[TETRIS_SCREEN_W * TETRIS_SCREEN_H];
 
-static uint32_t read_buttons(void)
+/* Keyboard stands in for the six hardware buttons. Letters that name a
+   hardware button are avoided on purpose, so nothing collides with the button
+   list drawn on the title screen. */
+static const struct {
+    SDL_Scancode key;
+    uint32_t     button;
+} keymap[] = {
+    { SDL_SCANCODE_LEFT,   BTN_LEFT  },
+    { SDL_SCANCODE_RIGHT,  BTN_RIGHT },
+    { SDL_SCANCODE_UP,     BTN_UP    },
+    { SDL_SCANCODE_DOWN,   BTN_DOWN  },
+    { SDL_SCANCODE_SPACE,  BTN_A     },
+    { SDL_SCANCODE_Z,      BTN_A     },
+    { SDL_SCANCODE_C,      BTN_B     },
+    { SDL_SCANCODE_LSHIFT, BTN_B     },
+    { SDL_SCANCODE_RETURN, BTN_START },
+    { SDL_SCANCODE_P,      BTN_START }
+};
+
+static uint32_t held_buttons(void)
 {
     const Uint8 *k = SDL_GetKeyboardState(NULL);
     uint32_t b = 0;
+    size_t i;
 
-    if (k[SDL_SCANCODE_LEFT]  || k[SDL_SCANCODE_A]) b |= BTN_LEFT;
-    if (k[SDL_SCANCODE_RIGHT] || k[SDL_SCANCODE_D]) b |= BTN_RIGHT;
-    if (k[SDL_SCANCODE_UP]    || k[SDL_SCANCODE_W]) b |= BTN_UP;
-    if (k[SDL_SCANCODE_DOWN]  || k[SDL_SCANCODE_S]) b |= BTN_DOWN;
-    if (k[SDL_SCANCODE_SPACE] || k[SDL_SCANCODE_Z]) b |= BTN_A;
-    if (k[SDL_SCANCODE_C]     || k[SDL_SCANCODE_LSHIFT]) b |= BTN_B;
-    if (k[SDL_SCANCODE_RETURN] || k[SDL_SCANCODE_P]) b |= BTN_START;
-
+    for (i = 0; i < sizeof(keymap) / sizeof(keymap[0]); i++) {
+        if (k[keymap[i].key]) {
+            b |= keymap[i].button;
+        }
+    }
     return b;
+}
+
+static uint32_t button_of(SDL_Scancode key)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(keymap) / sizeof(keymap[0]); i++) {
+        if (keymap[i].key == key) {
+            return keymap[i].button;
+        }
+    }
+    return 0;
 }
 
 static uint32_t load_hiscore(void)
@@ -64,8 +94,11 @@ int main(int argc, char **argv)
     SDL_Renderer *ren;
     SDL_Texture *tex;
     gfx_t g;
+    bot_t bot;
     int scale = 2;
+    int demo = 0;
     int running = 1;
+    uint32_t latched = 0;
     int i;
 
     for (i = 1; i < argc; i++) {
@@ -73,8 +106,15 @@ int main(int argc, char **argv)
             scale = atoi(argv[++i]);
             if (scale < 1) scale = 1;
             if (scale > 6) scale = 6;
+        } else if (!strcmp(argv[i], "--demo")) {
+            demo = 1;
         } else if (!strcmp(argv[i], "--help")) {
-            printf("usage: %s [--scale N]\n", argv[0]);
+            printf("usage: %s [--scale N] [--demo]\n\n"
+                   "  --scale N  window magnification, 1..6 (default 2)\n"
+                   "  --demo     let the built-in bot play\n\n"
+                   "keys: arrows move/rotate/soft drop, Space or Z = A (hard drop),\n"
+                   "      C or Left Shift = B (hold), Enter or P = START (pause),\n"
+                   "      Escape quits\n", argv[0]);
             return 0;
         }
     }
@@ -86,7 +126,8 @@ int main(int argc, char **argv)
 
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
 
-    win = SDL_CreateWindow("TETRIS 240x320",
+    win = SDL_CreateWindow(demo ? "TETRIS 240x320 - demo"
+                                : "TETRIS 240x320 - arrows, Space=A, C=B, Enter=START",
                            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                            TETRIS_SCREEN_W * scale, TETRIS_SCREEN_H * scale,
                            SDL_WINDOW_SHOWN);
@@ -126,22 +167,31 @@ int main(int argc, char **argv)
     g.y_off = 0;
 
     tetris_init(SDL_GetTicks() ^ 0xA5A5F00Du, load_hiscore());
+    bot_reset(&bot);
 
     while (running) {
         SDL_Event ev;
         uint32_t start = SDL_GetTicks();
+        uint32_t buttons;
 
         while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) {
                 running = 0;
-            } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat &&
-                       ev.key.keysym.sym == SDLK_ESCAPE) {
-                running = 0;
+            } else if (ev.type == SDL_KEYDOWN && !ev.key.repeat) {
+                if (ev.key.keysym.sym == SDLK_ESCAPE) {
+                    running = 0;
+                }
+                /* Remember presses that arrive and end between two polls,
+                   otherwise a very short tap would be lost entirely. */
+                latched |= button_of(ev.key.keysym.scancode);
             }
             /* Mouse and touch events are intentionally not handled. */
         }
 
-        tetris_tick(start, read_buttons());
+        buttons = demo ? bot_step(&bot) : (held_buttons() | latched);
+        latched = 0;
+
+        tetris_tick(start, buttons);
         tetris_render(&g);
 
         if (tetris_take_highscore_dirty()) {

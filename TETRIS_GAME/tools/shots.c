@@ -1,7 +1,6 @@
 /*
- * shots.c - headless harness: plays the game with a scripted bot, checks
- * invariants and writes PNG screenshots. Needs no display and no SDL, so it
- * runs in CI.
+ * shots.c - headless harness: plays the game with the bot, checks invariants
+ * and writes PNG screenshots. Needs no display and no SDL, so it runs in CI.
  *
  *   usage: tetris_shots [output_dir]
  */
@@ -11,6 +10,7 @@
 
 #include "gfx.h"
 #include "tetris.h"
+#include "bot.h"
 #include "png_write.h"
 
 #define W TETRIS_SCREEN_W
@@ -39,7 +39,7 @@ static void step(uint32_t buttons)
     clock_ms += TETRIS_FRAME_MS;
 }
 
-/* A button press only registers on its rising edge, so tap = press, release. */
+/* A button only registers on its rising edge, so tap = press, release. */
 static void tap(uint32_t button)
 {
     step(button);
@@ -66,169 +66,6 @@ static void shot(const char *name)
         printf("  wrote %s\n", path);
     }
 }
-
-/* ------------------------------------------------------------------ */
-/* Bot                                                                 */
-/* ------------------------------------------------------------------ */
-
-typedef struct {
-    uint8_t cell[TETRIS_FIELD_H][TETRIS_FIELD_W];
-} grid_t;
-
-static void grab_grid(grid_t *g)
-{
-    int x, y;
-
-    for (y = 0; y < TETRIS_FIELD_H; y++) {
-        for (x = 0; x < TETRIS_FIELD_W; x++) {
-            g->cell[y][x] = tetris_cell(x, y) ? 1 : 0;
-        }
-    }
-}
-
-static int hits(const grid_t *g, uint16_t s, int px, int py)
-{
-    int x, y;
-
-    for (y = 0; y < 4; y++) {
-        for (x = 0; x < 4; x++) {
-            int bx = px + x;
-            int by = py + y;
-
-            if (!(s & (1u << (y * 4 + x)))) {
-                continue;
-            }
-            if (bx < 0 || bx >= TETRIS_FIELD_W || by >= TETRIS_FIELD_H) {
-                return 1;
-            }
-            if (by >= 0 && g->cell[by][bx]) {
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
-/* Classic four-feature evaluation: prefer clearing lines, punish height,
-   covered holes and a jagged surface. */
-static int evaluate(const grid_t *g)
-{
-    int heights[TETRIS_FIELD_W];
-    int x, y;
-    int total_height = 0, holes = 0, bumpiness = 0, lines = 0;
-
-    for (x = 0; x < TETRIS_FIELD_W; x++) {
-        int top = TETRIS_FIELD_H;
-
-        for (y = 0; y < TETRIS_FIELD_H; y++) {
-            if (g->cell[y][x]) {
-                top = y;
-                break;
-            }
-        }
-        heights[x] = TETRIS_FIELD_H - top;
-        total_height += heights[x];
-
-        for (y = top + 1; y < TETRIS_FIELD_H; y++) {
-            if (!g->cell[y][x]) {
-                holes++;
-            }
-        }
-    }
-    for (x = 0; x + 1 < TETRIS_FIELD_W; x++) {
-        int d = heights[x] - heights[x + 1];
-        bumpiness += (d < 0) ? -d : d;
-    }
-    for (y = 0; y < TETRIS_FIELD_H; y++) {
-        int full_row = 1;
-
-        for (x = 0; x < TETRIS_FIELD_W; x++) {
-            if (!g->cell[y][x]) {
-                full_row = 0;
-                break;
-            }
-        }
-        lines += full_row;
-    }
-
-    return -51 * total_height + 760 * lines - 360 * holes - 18 * bumpiness;
-}
-
-/* Picks a rotation and column for the falling piece, then plays it. */
-static void bot_place_piece(void)
-{
-    grid_t base;
-    int piece, rot, col, row;
-    int best_score = -(1 << 30);
-    int best_rot = 0, best_col = 0;
-    int r, c;
-    int rotations, i;
-
-    if (!tetris_active(&piece, &rot, &col, &row)) {
-        idle(2);
-        return;
-    }
-    grab_grid(&base);
-
-    for (r = 0; r < 4; r++) {
-        uint16_t s = tetris_shape_bits(piece, r);
-
-        for (c = -3; c < TETRIS_FIELD_W; c++) {
-            grid_t g = base;
-            int py = -4;
-            int x, y, score;
-
-            if (hits(&g, s, c, py)) {
-                continue;
-            }
-            while (!hits(&g, s, c, py + 1)) {
-                py++;
-            }
-            if (py < -1) {
-                continue; /* would lock outside the well */
-            }
-            for (y = 0; y < 4; y++) {
-                for (x = 0; x < 4; x++) {
-                    if ((s & (1u << (y * 4 + x))) && py + y >= 0) {
-                        g.cell[py + y][c + x] = 1;
-                    }
-                }
-            }
-            score = evaluate(&g);
-            if (score > best_score) {
-                best_score = score;
-                best_rot = r;
-                best_col = c;
-            }
-        }
-    }
-
-    rotations = (best_rot - rot) & 3;
-    for (i = 0; i < rotations; i++) {
-        tap(BTN_UP);
-    }
-
-    if (!tetris_active(&piece, &rot, &col, &row)) {
-        return;
-    }
-    while (col != best_col) {
-        int before = col;
-
-        tap(col < best_col ? BTN_RIGHT : BTN_LEFT);
-        if (!tetris_active(&piece, &rot, &col, &row)) {
-            return;
-        }
-        if (col == before) {
-            break; /* blocked by a wall or the stack */
-        }
-    }
-
-    tap(BTN_A);
-}
-
-/* ------------------------------------------------------------------ */
-/* Checks                                                              */
-/* ------------------------------------------------------------------ */
 
 static void check_no_settled_full_rows(void)
 {
@@ -275,11 +112,13 @@ static void check_band_rendering(void)
 
 int main(int argc, char **argv)
 {
+    bot_t bot;
     uint32_t prev_score = 0, prev_lines = 0;
-    int pieces = 0;
+    int frames = 0;
+    int drops = 0;
     int got_clear_shot = 0;
+    int got_early_shot = 0;
     int got_mid_shot = 0;
-    int i;
 
     if (argc > 1) {
         snprintf(out_dir, sizeof(out_dir), "%s", argv[1]);
@@ -299,20 +138,15 @@ int main(int argc, char **argv)
     check(tetris_state() == TETRIS_RUNNING, "A starts the game");
     check(tetris_active(NULL, NULL, NULL, NULL), "a piece is falling");
 
-    for (i = 0; i < 6; i++) {
-        bot_place_piece();
-        idle(4);
-        pieces++;
-    }
-    shot("02_early_game");
+    bot_reset(&bot);
 
-    /* Play until the bot dies or the stack has had a long life. */
-    while (pieces < 900 && tetris_state() != TETRIS_GAMEOVER) {
-        if (tetris_state() == TETRIS_RUNNING) {
-            bot_place_piece();
-            pieces++;
-        } else {
-            idle(1);
+    while (frames < 60000 && tetris_state() != TETRIS_GAMEOVER) {
+        uint32_t buttons = bot_step(&bot);
+
+        step(buttons);
+        frames++;
+        if (buttons & BTN_A) {
+            drops++;
         }
 
         check(tetris_score() >= prev_score, "score never decreases");
@@ -322,11 +156,15 @@ int main(int argc, char **argv)
         prev_lines = tetris_lines();
         check_no_settled_full_rows();
 
+        if (!got_early_shot && drops >= 6 && tetris_state() == TETRIS_RUNNING) {
+            shot("02_early_game");
+            got_early_shot = 1;
+        }
         if (!got_clear_shot && tetris_state() == TETRIS_CLEARING) {
             shot("03_line_clear");
             got_clear_shot = 1;
         }
-        if (!got_mid_shot && pieces >= 120 && tetris_state() == TETRIS_RUNNING) {
+        if (!got_mid_shot && drops >= 120 && tetris_state() == TETRIS_RUNNING) {
             shot("04_mid_game");
             check_band_rendering();
             got_mid_shot = 1;
@@ -343,22 +181,27 @@ int main(int argc, char **argv)
     }
 
     check(got_clear_shot, "the bot completed at least one line");
-    printf("  played %d pieces, score %u, lines %u, level %d\n",
-           pieces, tetris_score(), tetris_lines(), tetris_level());
+    check(got_mid_shot, "the bot survived at least 120 pieces");
+    printf("  dropped %d pieces over %d frames, score %u, lines %u, level %d\n",
+           drops, frames, tetris_score(), tetris_lines(), tetris_level());
 
-    /* Stack up quickly with unrotated drops to reach the game over screen. */
-    while (tetris_state() != TETRIS_GAMEOVER && pieces < 1400) {
+    /* Stack up with unrotated drops to reach the game over screen. */
+    while (tetris_state() != TETRIS_GAMEOVER && frames < 90000) {
         if (tetris_state() == TETRIS_RUNNING) {
             tap(BTN_A);
-            pieces++;
+            frames += 2;
         } else {
             idle(1);
+            frames++;
         }
     }
     check(tetris_state() == TETRIS_GAMEOVER, "topping out ends the game");
     check(tetris_highscore() >= tetris_score(), "high score tracks the score");
     shot("06_game_over");
 
+    /* The bot may still be holding A from the drop that topped it out, and a
+       button only acts on its rising edge, so let go first. */
+    idle(2);
     tap(BTN_A);
     check(tetris_state() == TETRIS_TITLE, "A returns to the title screen");
 
@@ -378,6 +221,18 @@ int main(int argc, char **argv)
         tap(BTN_B);
         tetris_active(&piece_again, NULL, NULL, NULL);
         check(piece_again == piece_after, "hold is limited to once per piece");
+    }
+
+    /* A single frame long press still registers, which is what a port that
+       polls slowly, or a very short tap on a real button, produces. */
+    {
+        int col_before = -1, col_after = -1;
+
+        tetris_active(NULL, NULL, &col_before, NULL);
+        step(BTN_LEFT);
+        step(0);
+        tetris_active(NULL, NULL, &col_after, NULL);
+        check(col_after == col_before - 1, "a one frame tap moves exactly one column");
     }
 
     if (failures) {

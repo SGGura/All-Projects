@@ -18,12 +18,17 @@ add_library(tetris_core STATIC
 )
 target_include_directories(tetris_core PUBLIC include)
 
-# Headless harness: plays the game with a bot, checks invariants, writes PNGs.
+# Optional automatic player: test harness and the simulator's attract mode.
+# A minimal firmware port does not need it.
+add_library(tetris_bot STATIC src/bot.c)
+target_link_libraries(tetris_bot PUBLIC tetris_core)
+
+# Headless harness: plays the game with the bot, checks invariants, writes PNGs.
 add_executable(tetris_shots
     tools/shots.c
     tools/png_write.c
 )
-target_link_libraries(tetris_shots PRIVATE tetris_core)
+target_link_libraries(tetris_shots PRIVATE tetris_bot)
 target_include_directories(tetris_shots PRIVATE tools)
 
 # Desktop simulator, built only when SDL2 is available.
@@ -36,7 +41,7 @@ if(TETRIS_BUILD_SDL)
 
     if(SDL2_FOUND)
         add_executable(tetris_sdl port/main_sdl.c)
-        target_link_libraries(tetris_sdl PRIVATE tetris_core ${SDL2_LIBRARIES})
+        target_link_libraries(tetris_sdl PRIVATE tetris_bot ${SDL2_LIBRARIES})
         target_include_directories(tetris_sdl PRIVATE ${SDL2_INCLUDE_DIRS})
         target_compile_options(tetris_sdl PRIVATE ${SDL2_CFLAGS_OTHER})
         target_link_directories(tetris_sdl PRIVATE ${SDL2_LIBRARY_DIRS})
