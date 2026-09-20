@@ -1,6 +1,6 @@
 /*
  * Raspberry Pi Zero 2 W: проверка привязки к PIC32MM по UART
- * (/dev/serial0), асимметричная схема Ed25519.
+ * (/dev/serial0), асимметричная схема Ed25519 + pairing lock по ID.
  *
  * У PI (код открыт/незащищён) — только ПУБЛИЧНЫЙ ключ. Даже полное
  * вскрытие этого бинаря не даёт извлечь ничего, чем можно прошить
@@ -15,7 +15,17 @@
  *   CRC16-CCITT (poly 0x1021, init 0xFFFF) считается по CMD+LEN+PAYLOAD.
  *
  *   CMD_NONCE    0x01  PI -> PIC32MM   payload = 16 случайных байт
- *   CMD_RESPONSE 0x02  PIC32MM -> PI   payload = Ed25519-подпись nonce, 64 байта
+ *   CMD_RESPONSE 0x02  PIC32MM -> PI   payload = DEVICE_ID(4) || подпись(64), 68 байт
+ *                                      подпись считается над DEVICE_ID || nonce.
+ *
+ * Pairing lock: DEVICE_ID сам по себе не секрет (4 байта, читается на
+ * запрос), поэтому криптографическую стойкость он не увеличивает. Его роль —
+ * привязать этот конкретный PI именно к этому физическому экземпляру
+ * PIC32MM: при первом успешном сопряжении ID фиксируется в локальном
+ * хранилище; при всех следующих проверках, помимо валидности подписи,
+ * сверяется совпадение ID с зафиксированным. Это защищает от подмены на
+ * "донорский" genuine-контроллер с валидным ключом, но с другим ID
+ * (например, извлечённый из другого экземпляра той же линейки).
  *
  * Проверка запускается периодически (heartbeat), а не только при старте.
  * Результат проверки не просто ставит флаг "ok/not ok" — из подписанного
@@ -30,6 +40,11 @@
  *   raspi-config -> Interface Options -> Serial Port
  *     - login shell over serial: No
  *     - serial port hardware:    Yes
+ *
+ * Каталог для pairing lock должен существовать заранее и быть доступен
+ * на запись только root (приложение обычно и так должно работать от
+ * root/выделенного системного пользователя для доступа к /dev/serial0):
+ *   install -d -m 0700 -o root -g root /var/lib/crypto_ud_pro
  */
 
 #include <stdio.h>
@@ -51,7 +66,13 @@
 #define CMD_NONCE       0x01
 #define CMD_RESPONSE    0x02
 #define NONCE_LEN       16
+#define ID_LEN          4
 #define SIG_LEN         64
+#define RESP_LEN        (ID_LEN + SIG_LEN)   /* 68 */
+
+#ifndef PAIRING_STORE_PATH
+#define PAIRING_STORE_PATH "/var/lib/crypto_ud_pro/pairing_id.bin"
+#endif
 
 /*
  * TODO: заменить на публичный ключ из keygen.c (соответствует PRIVATE_KEY
@@ -66,6 +87,7 @@ static const uint8_t PUBLIC_KEY[32] = {
 
 typedef struct {
     bool    valid;
+    uint8_t device_id[ID_LEN];
     uint8_t signature[SIG_LEN];
 } binding_result_t;
 
@@ -135,7 +157,7 @@ static bool send_nonce_frame(int fd, const uint8_t *nonce)
     return uart_write_all(fd, frame, i);
 }
 
-static bool recv_response_frame(int fd, uint8_t sig[SIG_LEN])
+static bool recv_response_frame(int fd, uint8_t id[ID_LEN], uint8_t sig[SIG_LEN])
 {
     for (int attempt = 0; attempt < RX_RETRIES; ++attempt) {
         uint8_t b;
@@ -144,11 +166,11 @@ static bool recv_response_frame(int fd, uint8_t sig[SIG_LEN])
         uint8_t cmd, len;
         if (!uart_read_byte(fd, &cmd)) continue;
         if (!uart_read_byte(fd, &len)) continue;
-        if (cmd != CMD_RESPONSE || len != SIG_LEN) continue;
+        if (cmd != CMD_RESPONSE || len != RESP_LEN) continue;
 
-        uint8_t payload[SIG_LEN];
+        uint8_t payload[RESP_LEN];
         bool ok = true;
-        for (int j = 0; j < SIG_LEN; ++j) {
+        for (int j = 0; j < RESP_LEN; ++j) {
             if (!uart_read_byte(fd, &payload[j])) { ok = false; break; }
         }
         if (!ok) continue;
@@ -156,17 +178,41 @@ static bool recv_response_frame(int fd, uint8_t sig[SIG_LEN])
         uint8_t crc_hi, crc_lo;
         if (!uart_read_byte(fd, &crc_hi) || !uart_read_byte(fd, &crc_lo)) continue;
 
-        uint8_t crc_buf[2 + SIG_LEN];
+        uint8_t crc_buf[2 + RESP_LEN];
         crc_buf[0] = cmd;
         crc_buf[1] = len;
-        memcpy(&crc_buf[2], payload, SIG_LEN);
+        memcpy(&crc_buf[2], payload, RESP_LEN);
         uint16_t crc = crc16_ccitt(crc_buf, sizeof(crc_buf));
         if (crc_hi != (uint8_t)(crc >> 8) || crc_lo != (uint8_t)(crc & 0xFF)) continue;
 
-        memcpy(sig, payload, SIG_LEN);
+        memcpy(id, payload, ID_LEN);
+        memcpy(sig, payload + ID_LEN, SIG_LEN);
         return true;
     }
     return false;
+}
+
+/* Хранилище зафиксированного при первом сопряжении ID. Само хранилище
+ * лежит на том же открытом Linux-хосте и его можно отредактировать при
+ * наличии root/физического доступа — как и любое состояние в открытом
+ * коде PI, это не защита "невозможно обойти", а барьер, который поднимает
+ * стоимость подмены выше тривиальной. */
+static bool pairing_load(uint8_t id_out[ID_LEN])
+{
+    int fd = open(PAIRING_STORE_PATH, O_RDONLY);
+    if (fd < 0) return false;
+    ssize_t n = read(fd, id_out, ID_LEN);
+    close(fd);
+    return n == ID_LEN;
+}
+
+static bool pairing_save(const uint8_t id[ID_LEN])
+{
+    int fd = open(PAIRING_STORE_PATH, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return false;
+    ssize_t n = write(fd, id, ID_LEN);
+    close(fd);
+    return n == ID_LEN;
 }
 
 static binding_result_t check_binding(int fd)
@@ -178,11 +224,32 @@ static binding_result_t check_binding(int fd)
 
     if (!send_nonce_frame(fd, nonce)) return result;
 
-    uint8_t sig[SIG_LEN];
-    if (!recv_response_frame(fd, sig)) return result;
+    uint8_t id[ID_LEN], sig[SIG_LEN];
+    if (!recv_response_frame(fd, id, sig)) return result;
 
-    if (!ed25519_verify(sig, nonce, NONCE_LEN, PUBLIC_KEY)) return result;
+    uint8_t msg[ID_LEN + NONCE_LEN];
+    memcpy(msg, id, ID_LEN);
+    memcpy(msg + ID_LEN, nonce, NONCE_LEN);
 
+    if (!ed25519_verify(sig, msg, sizeof(msg), PUBLIC_KEY)) return result;
+
+    uint8_t pinned_id[ID_LEN];
+    if (pairing_load(pinned_id)) {
+        if (memcmp(pinned_id, id, ID_LEN) != 0) {
+            fprintf(stderr,
+                    "ID контроллера не совпадает с зафиксированным при сопряжении "
+                    "(возможна подмена на другой экземпляр)\n");
+            return result;
+        }
+    } else {
+        if (!pairing_save(id)) {
+            fprintf(stderr, "не удалось сохранить pairing lock (%s)\n", PAIRING_STORE_PATH);
+            return result;
+        }
+        fprintf(stderr, "первое сопряжение: ID контроллера зафиксирован\n");
+    }
+
+    memcpy(result.device_id, id, ID_LEN);
     memcpy(result.signature, sig, SIG_LEN);
     result.valid = true;
     return result;
@@ -216,7 +283,8 @@ int main(void)
              * работает), а не просто пропуск блока по условию. */
         } else {
             double k = derive_control_coefficient(r.signature);
-            printf("привязка подтверждена, коэффициент=%f\n", k);
+            printf("привязка подтверждена, ID=%02X%02X%02X%02X, коэффициент=%f\n",
+                   r.device_id[0], r.device_id[1], r.device_id[2], r.device_id[3], k);
             /* k используется дальше как обязательный параметр реальной
              * рабочей логики приложения. */
         }

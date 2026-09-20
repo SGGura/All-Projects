@@ -15,7 +15,17 @@
  *   CRC16-CCITT (poly 0x1021, init 0xFFFF) считается по CMD+LEN+PAYLOAD.
  *
  *   CMD_NONCE    0x01  PI -> PIC32MM   payload = 16 случайных байт
- *   CMD_RESPONSE 0x02  PIC32MM -> PI   payload = Ed25519-подпись nonce, 64 байта
+ *   CMD_RESPONSE 0x02  PIC32MM -> PI   payload = DEVICE_ID(4) || подпись(64), 68 байт
+ *                                      подпись считается над DEVICE_ID || nonce,
+ *                                      а не только над nonce — иначе ID можно было
+ *                                      бы подменить независимо от подписи.
+ *
+ * DEVICE_ID — уникальный на экземпляр код, прошиваемый в память программ на
+ * производстве вместе с PRIVATE_KEY/PUBLIC_KEY (см. tools/keygen.c). PI
+ * запрашивает его тем же обменом, что и подпись, и использует для pairing
+ * lock (см. pi_side/pi_uart_ed25519.c) — привязки конкретного PI именно к
+ * этому физическому экземпляру PIC32MM, а не к любому "genuine" чипу из
+ * той же партии.
  *
  * Ключевая пара генерируется ОДИН РАЗ на доверенном компьютере разработчика
  * инструментом ../tools/keygen.c (никогда не на самом PIC32MM/PI) —
@@ -47,8 +57,16 @@
 #define CMD_NONCE       0x01
 #define CMD_RESPONSE    0x02
 #define NONCE_LEN       16
+#define ID_LEN          4
 #define SIG_LEN         64
-#define MAX_PAYLOAD     64
+#define RESP_LEN        (ID_LEN + SIG_LEN)   /* 68 */
+#define MAX_PAYLOAD     RESP_LEN
+
+/*
+ * TODO: заменить на реальный уникальный ID этого экземпляра, прошиваемый
+ * на производстве (серийный номер и т.п.). Значение ниже — заглушка.
+ */
+static const uint8_t DEVICE_ID[ID_LEN] = { 0x00, 0x00, 0x00, 0x01 };
 
 /*
  * TODO: заменить на реальную ключевую пару, сгенерированную keygen.c.
@@ -168,8 +186,14 @@ int main(void)
         if (!rx_frame(&cmd, payload, &len)) continue;
         if (cmd != CMD_NONCE || len != NONCE_LEN) continue;
 
-        uint8_t sig[SIG_LEN];
-        ed25519_sign(sig, payload, NONCE_LEN, PUBLIC_KEY, PRIVATE_KEY);
-        tx_frame(CMD_RESPONSE, sig, sizeof(sig));
+        uint8_t msg[ID_LEN + NONCE_LEN];
+        memcpy(msg, DEVICE_ID, ID_LEN);
+        memcpy(msg + ID_LEN, payload, NONCE_LEN);
+
+        uint8_t resp[RESP_LEN];
+        memcpy(resp, DEVICE_ID, ID_LEN);
+        ed25519_sign(resp + ID_LEN, msg, sizeof(msg), PUBLIC_KEY, PRIVATE_KEY);
+
+        tx_frame(CMD_RESPONSE, resp, sizeof(resp));
     }
 }
