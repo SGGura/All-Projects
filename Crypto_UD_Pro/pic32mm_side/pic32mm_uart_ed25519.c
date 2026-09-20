@@ -40,6 +40,17 @@
  *    RPINRx/RPORx свои для каждого корпуса/варианта чипа);
  *  - подставить в SYS_FREQ реальную частоту периферийной шины;
  *  - заменить PRIVATE_KEY/PUBLIC_KEY на значения из keygen.c.
+ *
+ * Троттлинг: без ограничения скорости атакующий с прямым доступом к
+ * линии UART (в обход PI) может гонять подписи на максимальной скорости
+ * порта вместо одного раза в HEARTBEAT_SEC на стороне PI — это резко
+ * облегчает сбор трасс для атаки по энергопотреблению (DPA/CPA) на
+ * операцию подписи. MIN_REQUEST_INTERVAL_MS ограничивает частоту
+ * реальных подписей минимальным интервалом; более частые запросы
+ * отбрасываются без ответа (без обратной связи атакующему, что запрос
+ * вообще дошёл). Используется регистр Count ядра MIPS (стандартный для
+ * PIC32, интринсик _CP0_GET_COUNT() из XC32) — не требует отдельного
+ * периферийного таймера.
  */
 
 #include <xc.h>
@@ -52,6 +63,11 @@
 #define SYS_FREQ            24000000UL
 #define UART_BAUD           115200UL
 #define BYTE_TIMEOUT_LOOPS  200000UL
+
+/* Count инкрементируется раз в 2 такта ядра (стандарт для MIPS CP0). */
+#define MIN_REQUEST_INTERVAL_MS     1000UL
+#define CORE_TIMER_TICKS_PER_MS     (SYS_FREQ / 2UL / 1000UL)
+#define MIN_REQUEST_INTERVAL_TICKS  (MIN_REQUEST_INTERVAL_MS * CORE_TIMER_TICKS_PER_MS)
 
 #define STX             0xAA
 #define CMD_NONCE       0x01
@@ -180,11 +196,21 @@ int main(void)
 {
     uart1_init();
 
+    uint32_t last_signed_tick = 0;
+    bool have_signed = false;
+
     for (;;) {
         uint8_t cmd, len, payload[MAX_PAYLOAD];
 
         if (!rx_frame(&cmd, payload, &len)) continue;
         if (cmd != CMD_NONCE || len != NONCE_LEN) continue;
+
+        uint32_t now = _CP0_GET_COUNT();
+        if (have_signed && (uint32_t)(now - last_signed_tick) < MIN_REQUEST_INTERVAL_TICKS) {
+            continue; /* запрос слишком частый, игнорируем без ответа */
+        }
+        last_signed_tick = now;
+        have_signed = true;
 
         uint8_t msg[ID_LEN + NONCE_LEN];
         memcpy(msg, DEVICE_ID, ID_LEN);
