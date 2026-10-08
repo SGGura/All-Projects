@@ -1,0 +1,19 @@
+# VS Code Settings
+.vscode/
+
+include/config
+include/sdkconfig.h
+build/
+sdkconfig.old
+.DS_Store
+
+*.pyc
+
+# IDF Component Manager
+managed_components/
+
+# Local ESP-IDF (fetched by build.py install)
+esp-idf/
+
+# Doc build artifacts
+docs/_build/
