@@ -1,0 +1,5 @@
+{
+  "name": "All-Projects — LVGL DINO_GAME simulator",
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/start.sh"
+}
